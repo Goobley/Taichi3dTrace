@@ -231,7 +231,11 @@ class TraceDex3d:
         if transform_param is not None:
             param_data = transform_param(param_data)
         self.param.from_numpy(param_data)
-        self.block_map = ti.field(dtype=ti.i32, shape=(self.num_z, self.num_y, self.num_x))
+        self.block_map = ti.field(dtype=ti.i32, shape=(
+            self.num_z // self.block_size,
+            self.num_y // self.block_size,
+            self.num_x // self.block_size
+        ))
         self.setup_block_map()
 
     def setup_block_map(self):
@@ -259,7 +263,13 @@ class TraceDex3d:
             sample_pos = o + t * d
             vox = ti.cast(sample_pos, ti.i32)
             block_coord = vox >> ivec3(self.log2_block_size)
-            block_idx = self.block_map[block_coord.z, block_coord.y, block_coord.x]
+            block_idx = -1
+            if (
+                ti.cast(block_coord.z, ti.u32) < self.block_map.shape[0] and
+                ti.cast(block_coord.y, ti.u32) < self.block_map.shape[1] and
+                ti.cast(block_coord.x, ti.u32) < self.block_map.shape[2]
+            ):
+                block_idx = self.block_map[block_coord.z, block_coord.y, block_coord.x]
             if block_idx != -1:
                 inner_coord = vox - block_coord * self.block_size
                 param = self.param[block_idx * self.block_stride + ((inner_coord.z * self.block_size + inner_coord.y) * self.block_size + inner_coord.x)]
@@ -273,7 +283,13 @@ class TraceDex3d:
     @ti.func
     def has_data(self, coord: ivec3) -> ti.i32:
         block_coord = coord >> ivec3(self.log2_block_size)
-        block_idx = self.block_map[block_coord.z, block_coord.y, block_coord.x]
+        block_idx = -1
+        if (
+            ti.cast(block_coord.z, ti.u32) < self.block_map.shape[0] and
+            ti.cast(block_coord.y, ti.u32) < self.block_map.shape[1] and
+            ti.cast(block_coord.x, ti.u32) < self.block_map.shape[2]
+        ):
+            block_idx = self.block_map[block_coord.z, block_coord.y, block_coord.x]
         return block_idx != -1
 
     @ti.func
@@ -338,12 +354,11 @@ class TraceDex3d:
             if self.has_data(s.curr_coord):
                 block_coord = s.curr_coord >> ivec3(self.log2_block_size)
                 block_idx = self.block_map[block_coord.z, block_coord.y, block_coord.x]
-                if block_idx != -1:
-                    inner_coord = s.curr_coord - block_coord * self.block_size
-                    param = self.param[block_idx * self.block_stride + ((inner_coord.z * self.block_size + inner_coord.y) * self.block_size + inner_coord.x)]
+                inner_coord = s.curr_coord - block_coord * self.block_size
+                param = self.param[block_idx * self.block_stride + ((inner_coord.z * self.block_size + inner_coord.y) * self.block_size + inner_coord.x)]
 
-                    # Replace with RTE
-                    result += self.transfer_function(param) * self.voxel_scale * s.dt
+                # Replace with RTE
+                result += self.transfer_function(param) * self.voxel_scale * s.dt
             if not self.step_through_grid(s, o, d, ts, inv_d):
                 break
         return result
@@ -444,7 +459,7 @@ def bilinear_copy(trace_buffer: ti.template()):
         uprime = u * ratio
         vprime = v * ratio
         if uprime >= trace_buffer.shape[0] or vprime >= trace_buffer.shape[1]:
-            gui_buffer[u, v] = vec3(1.0, 0.0, 1.0)
+            gui_buffer[u, v] = vec3(0.0)
             continue
         uv = vec2(uprime, vprime)
         corner = ti.cast(ti.math.floor(uv), ti.i32)
@@ -459,7 +474,10 @@ def bilinear_copy(trace_buffer: ti.template()):
         for p in range(4):
             py = p // 2
             px = p - py * 2
-            result += weights[p] * trace_buffer[corner[0] + px, corner[1] + py]
+            result += weights[p] * trace_buffer[
+                ti.math.min(corner[0] + px, trace_buffer.shape[0]-1),
+                ti.math.min(corner[1] + py, trace_buffer.shape[1]-1),
+            ]
         gui_buffer[u, v] = result
 
 @ti.kernel
@@ -525,7 +543,7 @@ if __name__ == "__main__":
         param_name="temperature",
         transform_param=lambda x: np.log10(x),
     )
-    cam = OrthoCamera(supersample=8, x_size=int(CAM_ASPECT * CAM_HEIGHT), y_size=CAM_HEIGHT)
+    cam = OrthoCamera(supersample=4, x_size=int(CAM_ASPECT * CAM_HEIGHT), y_size=CAM_HEIGHT)
     if USE_MSAA:
         msaa_samples = ti.field(vec2, shape=(cam.supersample,))
         samples = get_msaa_samples(cam.supersample)
